@@ -1163,6 +1163,19 @@ def _sina_stock_code(code: str) -> str:
     return f"{_get_prefix(code)}{code}"
 
 
+# 定期报告法定披露截止：一季报、三季报在报告期结束后 1 个月内，半年报 2 个月内，年报 4 个月内
+_REPORT_DEADLINE_MONTHS = {3: 1, 6: 2, 9: 1, 12: 4}
+
+
+def _report_deadline(report_date: pd.Series) -> pd.Series:
+    """报告期 → 法定披露截止日（报告期都是月末，按月末顺延）；非标准报告期保守按 4 个月。"""
+    deadline = report_date + pd.offsets.MonthEnd(4)
+    for month, lag in _REPORT_DEADLINE_MONTHS.items():
+        hit = report_date.dt.month == month
+        deadline[hit] = report_date[hit] + pd.offsets.MonthEnd(lag)
+    return deadline
+
+
 def _get_financial_report_sina(
     code: str, report_type: str, freq: str, curr_date: str = None,
 ) -> pd.DataFrame:
@@ -1193,9 +1206,9 @@ def _get_financial_report_sina(
     result = d.get("result", {}).get("data", {})
     items = result.get(source_type, [])
 
-    # [本地补丁 2026-10-05] 新浪已把财报结果从 data.<fzb|lrb|llb>（行列表）
-    # 改成 data.report_list{报告期: {..., data: [{item_title, item_value}]}}。
-    # 旧代码只认前者，导致三张财报表静默返回空表（"No balance sheet data found"）。
+    # 新浪把财报结果从 data.<fzb|lrb|llb>（行列表）改成了
+    # data.report_list{报告期: {publish_date, ..., data: [{item_title, item_value}]}}。
+    # 只认前者时三张财报表会静默返回空表（"No balance sheet data found"，#116）。
     # 这里同时兼容两种结构，上游再改版也不会退化成空表。
     if not isinstance(items, list) or not items:
         report_list = result.get("report_list")
@@ -1209,6 +1222,9 @@ def _get_financial_report_sina(
                     if isinstance(item, dict) and item.get("item_title"):
                         row[item["item_title"]] = item.get("item_value")
                 if len(row) > 1:
+                    # 公告日只用于下面按分析日判断是否已公布，返回前去掉
+                    if payload.get("publish_date"):
+                        row["公告日"] = payload["publish_date"]
                     rows.append(row)
         elif isinstance(report_list, list):
             rows = [x for x in report_list if isinstance(x, dict)]
@@ -1219,18 +1235,28 @@ def _get_financial_report_sina(
 
     df = pd.DataFrame(items)
 
-    # Filter by curr_date
+    # Filter by curr_date：报告期在分析日之前还不够，财报还得在分析日之前已经公布。
+    # 例：分析日 07-15 时 06-30 的半年报要到 8 月才公布，只按报告期筛会提前看到它。
+    # 已公布 = 法定披露截止日已过（截止日当晚才发的也有，所以要严格晚于截止日），
+    # 或新浪给的公告日已到。新浪对较早报告期给的「公告日」是第二年同期财报把它当
+    # 对比数再刊出的日期（只会偏晚），不能单独用来筛，否则回看历史时早已公布的财报
+    # 会被整批丢掉。没有公告日的行（旧结构）只按截止日判断。
     if curr_date and "报告日" in df.columns:
-        df["报告日"] = pd.to_datetime(df["报告日"], errors="coerce")
         cutoff = pd.to_datetime(curr_date)
-        df = df[df["报告日"] <= cutoff]
+        df["报告日"] = pd.to_datetime(df["报告日"], errors="coerce")
+        available = _report_deadline(df["报告日"]) < cutoff
+        if "公告日" in df.columns:
+            published = pd.to_datetime(df["公告日"], errors="coerce")
+            available |= published <= cutoff
+        df = df[available]
 
     # Filter by frequency (annual = month 12 reports only)
     if freq.lower() == "annual" and "报告日" in df.columns:
         months = pd.to_datetime(df["报告日"], errors="coerce").dt.month
         df = df[months == 12]
 
-    return df.head(8)
+    # 公告日只用于上面的筛选；较早报告期的值是后来的刊出日，放进表里会误导分析师
+    return df.drop(columns=["公告日"], errors="ignore").head(8)
 
 
 def get_balance_sheet(
