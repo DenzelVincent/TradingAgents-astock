@@ -64,8 +64,8 @@ def validate_model_selection(config: dict | None = None) -> str | None:
     界面完全对不上号的错误。
 
     **必须同时挂在唯一的消费点**（web/app.py 拿到 start_analysis 之后、真正起线程之前）：
-    `start_analysis` 有 5 个生产者——侧栏「开始分析」、侧栏「未完成任务」续跑、历史记录、
-    报告页「重新分析」、错误页「继续未完成任务」——只在按钮里守一个，其余四条路径照样
+    `start_analysis` 有 4 个生产者——侧栏「开始分析」、侧栏「未完成任务」续跑、
+    报告页「重新分析」、错误页「继续未完成任务」（历史记录只把它清空）——只在按钮里守一个，其余三条路径照样
     把空模型发出去（实测踩过：深模型选「Custom model ID」且留空，走续跑路径，
     收到 `but you passed .`）。
 

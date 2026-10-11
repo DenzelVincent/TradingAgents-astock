@@ -276,3 +276,38 @@ def test_is_historical_uses_market_timezone_not_host(monkeypatch):
     # 市场当天不该被判成历史，哪怕主机日历已经翻页
     assert a_stock._is_historical("2026-08-09") is False
     assert a_stock._is_historical("2026-08-08") is True
+
+
+def test_statement_tools_require_curr_date():
+    """三张财报表按分析日筛已公布的报表；curr_date 可选时模型漏传就整段不筛（v0.5.21 复核指出）。"""
+    from tradingagents.agents.utils.agent_utils import (
+        get_balance_sheet,
+        get_cashflow,
+        get_income_statement,
+    )
+
+    for tool in (get_balance_sheet, get_cashflow, get_income_statement):
+        required = tool.args_schema.model_json_schema().get("required", [])
+        assert "curr_date" in required, tool.name
+
+
+def test_statement_tools_forward_curr_date():
+    import inspect
+
+    from tradingagents.agents.utils import fundamental_data_tools
+
+    src = inspect.getsource(fundamental_data_tools)
+    for name in ("get_balance_sheet", "get_cashflow", "get_income_statement"):
+        call = f'route_to_vendor("{name}", ticker, freq, curr_date)'
+        assert call in src, f"{name} 没有把 curr_date 转发给数据层"
+
+
+def test_fundamentals_prompt_asks_for_date_on_statement_tools():
+    import inspect
+
+    from tradingagents.agents.analysts import fundamentals_analyst
+
+    src = inspect.getsource(fundamentals_analyst.create_fundamentals_analyst)
+    for name in ("get_balance_sheet", "get_cashflow", "get_income_statement"):
+        assert f"{name}(ticker, curr_date)" in src, name
+    assert "三张财报表的 **curr_date 也必须传" in src

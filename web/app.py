@@ -206,9 +206,9 @@ with st.sidebar:
 
 start_req = st.session_state.pop("start_analysis", None)
 if start_req:
-    # 唯一的消费点，所以模型校验挂在这里。`start_analysis` 有 5 个生产者——侧栏
-    # 「开始分析」、侧栏「未完成任务」续跑、历史记录、报告页「重新分析」、错误页
-    # 「继续未完成任务」——只在按钮里守一个，其余四条路径照样把空模型发给 API
+    # 唯一的消费点，所以模型校验挂在这里。`start_analysis` 有 4 个生产者——侧栏
+    # 「开始分析」、侧栏「未完成任务」续跑、报告页「重新分析」、错误页「继续未完成
+    # 任务」（历史记录只把它清空）——只在按钮里守一个，其余三条路径照样把空模型发给 API
     # （实测踩到：深模型选「Custom model ID」且留空、走续跑路径，收到 `but you passed .`）。
     # 校验的是 `_build_config()` 的产物，也就是真正要发出去的那份配置。
     config = _build_config()

@@ -149,8 +149,8 @@ def test_validation_of_explicit_config_passes():
 def test_app_guards_at_the_consumption_point():
     """结构性回归：模型校验必须挂在 `start_analysis` 的**消费点**。
 
-    `start_analysis` 有 5 个生产者（侧栏开始分析 / 未完成任务续跑 / 历史记录 /
-    报告页重新分析 / 错误页继续未完成任务）。只在侧栏按钮里守一个是不够的——实测
+    `start_analysis` 有 4 个生产者（侧栏开始分析 / 未完成任务续跑 /
+    报告页重新分析 / 错误页继续未完成任务；历史记录只把它清空）。只在侧栏按钮里守一个是不够的——实测
     漏过：深模型选「Custom model ID」且留空、走续跑路径，请求带着空模型打了出去，
     收到 `The supported API model names are ..., but you passed .`。
 

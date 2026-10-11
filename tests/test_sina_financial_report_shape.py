@@ -1,11 +1,9 @@
 """Regression tests for the Sina financial-statement response shape.
 
-Sina moved the payload from ``result.data.<fzb|lrb|llb>`` (a flat list of rows)
-to ``result.data.report_list{报告期: {..., data: [{item_title, item_value}]}}``.
-
-The old parser only read the former, so all three statements silently came back
-as "No ... data found" instead of raising — the agent then reported "this stock
-has no financial statements" as a fact.
+The API returns ``result.data.report_list{报告期: {..., data: [{item_title, item_value}]}}``.
+The parser written in v0.2.5 only read ``result.data.<fzb|lrb|llb>`` (a flat list of
+rows), so all three statements silently came back as "No ... data found" instead of
+raising — the agent then reported "this stock has no financial statements" as a fact.
 """
 
 import copy
@@ -16,7 +14,7 @@ import pytest
 
 from tradingagents.dataflows import a_stock
 
-# Shape returned by the API since ~2026-10.
+# Shape the live API returns.
 NEW_SHAPE = {
     "result": {
         "status": {"code": 0},
@@ -61,7 +59,7 @@ NEW_SHAPE = {
     }
 }
 
-# Shape the parser was originally written against.
+# Flat-list shape the v0.2.5 parser was written against; kept for compatibility.
 LEGACY_SHAPE = {
     "result": {
         "data": {
@@ -172,13 +170,25 @@ def test_report_not_yet_published_on_analysis_date_is_excluded(mock_get):
 
 @pytest.mark.unit
 @patch("tradingagents.dataflows.a_stock._requests.get")
-def test_report_published_on_or_before_analysis_date_is_kept(mock_get):
+def test_report_published_before_analysis_date_is_kept(mock_get):
     mock_get.return_value = _response(_with_publish_dates("20260815", "20260425"))
 
-    for curr_date in ("2026-08-15", "2026-09-30"):
+    for curr_date in ("2026-08-16", "2026-09-30"):
         out = a_stock.get_balance_sheet("600519", "quarterly", curr_date)
         assert "53518798979.08" in out, (curr_date, out)
         assert "50000000000.0" in out, (curr_date, out)
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_publish_day_itself_is_not_enough(mock_get):
+    """Reports often go out after the close on their publish_date; the analysis day must be later."""
+    mock_get.return_value = _response(_with_publish_dates("20260815", "20260425"))
+
+    out = a_stock.get_balance_sheet("600519", "quarterly", "2026-08-15")
+
+    assert "53518798979.08" not in out
+    assert "50000000000.0" in out
 
 
 @pytest.mark.unit
@@ -250,3 +260,182 @@ def test_deadline_day_itself_is_not_enough(mock_get):
 
     assert "53518798979.08" not in a_stock.get_balance_sheet("600519", "quarterly", "2026-08-31")
     assert "53518798979.08" in a_stock.get_balance_sheet("600519", "quarterly", "2026-09-01")
+
+
+def _ts(beijing_time):
+    """Unix seconds as Sina's update_time, from a Beijing wall-clock time."""
+    return str(int(pd.Timestamp(beijing_time, tz="Asia/Shanghai").timestamp()))
+
+
+def _periods(**periods):
+    """report_list with one 货币资金 row per period: name -> (value, publish_date, update_time)."""
+    report_list = {}
+    for name, (value, published, updated) in periods.items():
+        payload = {"data": [{"item_field": "CURFDS", "item_title": "货币资金", "item_value": value}]}
+        if published:
+            payload["publish_date"] = published
+        if updated:
+            payload["update_time"] = updated
+        report_list[name[1:]] = payload
+    return {"result": {"data": {"report_list": report_list}}}
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_late_filer_is_not_shown_once_the_deadline_passes(mock_get):
+    """A company that files its annual report in July must not appear published on 04-30.
+
+    Real case: 300630's 2023 annual and 2024 Q1 reports both came out on 2024-07-05.
+    """
+    mock_get.return_value = _response(_periods(
+        d20251231=("111.0", "20260705", _ts("2026-07-05 23:42")),
+        d20250930=("222.0", "20251030", _ts("2025-10-29 18:12")),
+    ))
+
+    for curr_date in ("2026-05-15", "2026-07-05"):
+        out = a_stock.get_balance_sheet("600519", "quarterly", curr_date)
+        assert "111.0" not in out, (curr_date, out)
+        assert "222.0" in out, (curr_date, out)
+    assert "111.0" in a_stock.get_balance_sheet("600519", "quarterly", "2026-07-06")
+
+    # Same late filer with no update_time: its publish_date alone is still the original date.
+    mock_get.return_value = _response(_periods(d20251231=("111.0", "20260705", None)))
+    assert "111.0" not in a_stock.get_balance_sheet("600519", "quarterly", "2026-05-15")
+    assert "111.0" in a_stock.get_balance_sheet("600519", "quarterly", "2026-07-06")
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_update_time_is_read_in_beijing_time(mock_get):
+    """07:30 Beijing is still the previous day in UTC; it must not count as entered the day before."""
+    mock_get.return_value = _response(_periods(
+        d20251231=("111.0", "20270420", _ts("2026-07-06 07:30")),
+    ))
+
+    assert "111.0" not in a_stock.get_income_statement("600519", "quarterly", "2026-07-06")
+    assert "111.0" in a_stock.get_income_statement("600519", "quarterly", "2026-07-07")
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_update_time_admits_report_whose_publish_date_was_rewritten(mock_get):
+    """600519's 2025 year-end balance sheet: published 2026-04-17, but publish_date now says
+    2026-08-15 (re-printed in the half-year report as the opening balance). update_time still
+    holds the original evening entry and must let it through from the next day."""
+    mock_get.return_value = _response(_periods(
+        d20251231=("111.0", "20260815", _ts("2026-04-16 22:54")),
+    ))
+
+    assert "111.0" not in a_stock.get_balance_sheet("600519", "quarterly", "2026-04-16")
+    for curr_date in ("2026-04-17", "2026-05-15"):
+        assert "111.0" in a_stock.get_balance_sheet("600519", "quarterly", curr_date), curr_date
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_deadline_applies_only_when_both_dates_were_rewritten(mock_get):
+    """Both dates more than a year after the period: the original date is lost, so assume on time.
+
+    600519's 2021-09-30 income statement: publish_date 2022-10-17, update_time 2022-10-16.
+    """
+    mock_get.return_value = _response(_periods(
+        d20210930=("111.0", "20221017", _ts("2022-10-16 15:57")),
+    ))
+
+    assert "111.0" not in a_stock.get_income_statement("600519", "quarterly", "2021-10-31")
+    assert "111.0" in a_stock.get_income_statement("600519", "quarterly", "2021-11-01")
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_late_filer_with_rewritten_publish_date_still_waits_for_update_time(mock_get):
+    """Income statement re-printed in next year's annual: publish_date moves a year on, but
+    update_time keeps the late July entry, so the original date is not lost."""
+    mock_get.return_value = _response(_periods(
+        d20251231=("111.0", "20270420", _ts("2026-07-05 23:42")),
+    ))
+
+    assert "111.0" not in a_stock.get_income_statement("600519", "quarterly", "2026-05-15")
+    assert "111.0" in a_stock.get_income_statement("600519", "quarterly", "2026-07-06")
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_internal_date_columns_are_not_returned(mock_get):
+    mock_get.return_value = _response(_periods(
+        d20251231=("111.0", "20260417", _ts("2026-04-16 22:54")),
+    ))
+
+    for curr_date in (None, "2026-09-30"):
+        out = a_stock.get_balance_sheet("600519", "quarterly", curr_date)
+        assert "111.0" in out, out
+        assert "公告日" not in out and "入库时间" not in out, out
+        assert "20260417" not in out, out
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_duplicate_item_titles_do_not_overwrite_each_other(mock_get):
+    """利润表 has 利息收入 under 营业总收入 and again under 财务费用; both values must survive."""
+    payload = {"result": {"data": {"report_list": {"20260630": {
+        "publish_date": "20260815",
+        "data": [
+            {"item_field": "BIZTOTINCO", "item_title": "营业总收入", "item_display": "大类", "item_value": "92278072083.21"},
+            {"item_field": "INTEINCO", "item_title": "利息收入", "item_display": "小类", "item_value": "1574811118.73"},
+            {"item_field": "FINEXPE", "item_title": "财务费用", "item_display": "小类", "item_value": "-243237716.96"},
+            {"item_field": "INTEINCOOPCOST", "item_title": "利息收入", "item_display": "缩进", "item_value": "266574096.14"},
+            {"item_field": "OTHERA", "item_title": "其他", "item_display": "小类", "item_value": "11.0"},
+            {"item_field": "OTHERB", "item_title": "其他", "item_display": "小类", "item_value": "22.0"},
+        ],
+    }}}}}
+    mock_get.return_value = _response(payload)
+
+    df = a_stock._get_financial_report_sina("600519", "利润表", "quarterly", "2026-09-30")
+
+    assert df.loc[df.index[0], "利息收入"] == "1574811118.73"
+    assert df.loc[df.index[0], "财务费用-利息收入"] == "266574096.14"
+    assert df.loc[df.index[0], "其他"] == "11.0"
+    assert df.loc[df.index[0], "其他（OTHERB）"] == "22.0"
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_newest_published_periods_come_first(mock_get):
+    """Output order must not depend on the order the API happens to list periods in."""
+    periods = {}
+    for i, period in enumerate(pd.period_range("2023Q1", "2025Q4", freq="Q")):
+        end = period.end_time.strftime("%Y%m%d")
+        periods["d" + end] = (f"{1000 + i}.0", None, None)
+    mock_get.return_value = _response(_periods(**periods))  # oldest first
+
+    df = a_stock._get_financial_report_sina("600519", "资产负债表", "quarterly", "2026-09-30")
+
+    assert list(df["货币资金"]) == [f"{1000 + i}.0" for i in range(11, 3, -1)]
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_missing_report_date_column_is_not_returned_unfiltered(mock_get):
+    """Without 报告日 there is no way to tell what was published by the analysis date."""
+    mock_get.return_value = _response({"result": {"data": {"report_list": [{"货币资金": "111.0"}]}}})
+
+    assert "No balance sheet data found" in a_stock.get_balance_sheet("600519", "quarterly", "2026-09-30")
+    assert "111.0" in a_stock.get_balance_sheet("600519", "quarterly", None)
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_older_analysis_dates_fetch_more_periods(mock_get):
+    """The API lists newest first; 20 periods only reach back ~5 years."""
+    mock_get.return_value = _response(NEW_SHAPE)
+    today = pd.Timestamp.now()
+
+    def num_for(curr_date):
+        a_stock.get_balance_sheet("600519", "quarterly", curr_date)
+        return int(mock_get.call_args.kwargs["params"]["num"])
+
+    assert num_for(None) == 20
+    assert num_for(today.strftime("%Y-%m-%d")) == 20
+    ten_years_ago = num_for((today - pd.DateOffset(years=10)).strftime("%Y-%m-%d"))
+    assert ten_years_ago >= 20 + 40 - 1, ten_years_ago
+    assert num_for("1990-01-01") == 120
