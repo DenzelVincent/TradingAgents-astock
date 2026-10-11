@@ -409,6 +409,40 @@ def test_two_periods_sharing_an_entry_time_are_not_a_batch(mock_get):
 
 @pytest.mark.unit
 @patch("tradingagents.dataflows.a_stock._requests.get")
+def test_late_filer_catching_up_three_periods_at_once_is_not_a_batch(mock_get):
+    """Only Sina's 2020-03-13 bulk load counts as a batch. A company that files its annual,
+    Q1 and H1 reports together on 2024-09-20 must stay hidden until then, even after next
+    year's reports rewrite all three publish dates."""
+    late = _ts("2024-09-20 22:10")
+    mock_get.return_value = _response(_periods(
+        d20240630=("333.0", "20250830", late),
+        d20240331=("222.0", "20250430", late),
+        d20231231=("111.0", "20250425", late),
+        d20230930=("90.0", "20241030", _ts("2023-10-30 19:00")),
+    ))
+
+    for curr_date in ("2024-06-15", "2024-09-01", "2024-09-20"):
+        out = a_stock.get_income_statement("600519", "quarterly", curr_date)
+        assert "111.0" not in out and "222.0" not in out and "333.0" not in out, (curr_date, out)
+    out = a_stock.get_income_statement("600519", "quarterly", "2024-09-21")
+    assert "111.0" in out and "222.0" in out and "333.0" in out, out
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_single_entry_on_the_batch_day_is_not_a_batch(mock_get):
+    """A late 2019Q3 report genuinely entered on 2020-03-13 is not part of the bulk load."""
+    mock_get.return_value = _response(_periods(
+        d20190930=("333.0", "20201026", _ts("2020-03-13 20:15")),
+        d20190630=("222.0", "20200729", _ts("2019-08-07 18:00")),
+    ))
+
+    assert "333.0" not in a_stock.get_income_statement("600519", "quarterly", "2019-12-01")
+    assert "333.0" in a_stock.get_income_statement("600519", "quarterly", "2020-03-14")
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
 def test_publish_date_on_the_period_end_is_ignored(mock_get):
     """Pre-listing rows can carry publish_date == report date (600519 19981231); no report is
     public on its own period end, so fall back to the deadline."""

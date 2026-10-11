@@ -1166,6 +1166,8 @@ def _sina_stock_code(code: str) -> str:
 # 新浪每期报表附带的公告日 / 入库时间，只在内部判断是否已公布，不返回
 _SINA_PUBLISHED = "_公告日"
 _SINA_UPDATED = "_入库时间"
+# 新浪给全市场做批量入库的那一天，之前的各期共用这一天的一个入库时间（见下面的筛选）
+_SINA_BATCH_IMPORT_DAY = pd.Timestamp("2020-03-13")
 
 # 定期报告法定披露截止：一季报、三季报在报告期结束后 1 个月内，半年报 2 个月内，年报 4 个月内
 _REPORT_DEADLINE_MONTHS = {3: 1, 6: 2, 9: 1, 12: 4}
@@ -1272,8 +1274,9 @@ def _get_financial_report_sina(
     #   不走这条，否则截止日一过就提前看到它还没发的财报。
     # - 新浪 2020-03-13 给全市场做过一次批量入库，之前的各期共用这一个入库时间（茅台利润表
     #   76 期）。它能证明这些期那时已公布，但不是原始入库时间，判断原始日期是否丢失时不算数，
-    #   否则 2019 年前三季的报表要到 2020-03-14 才放行。正常情况下共用同一入库时间的最多两期
-    #   （年报和一季报同一天发、次年同期报表重述对比数），所以按 3 期及以上认定为批量入库。
+    #   否则 2019 年前三季的报表要到 2020-03-14 才放行。只认这一天、且 3 期及以上共用：
+    #   正常情况下共用同一入库时间的最多两期（年报和一季报同一天发、重述对比数）；别的日期
+    #   多期共用可能是逾期公司一次补发几期，按截止日放行会提前露出，宁可等入库时间。
     # - 公告日不晚于报告期的（上市前的数据有写成报告期当天的）不可信，当作没有。
     if curr_date:
         if "报告日" not in df.columns:
@@ -1296,7 +1299,9 @@ def _get_financial_report_sina(
             if _SINA_UPDATED in df.columns else nat
         )
         published = published.where(published > report)
-        batch = updated.map(updated.value_counts()) >= 3
+        batch = (updated.dt.normalize() == _SINA_BATCH_IMPORT_DAY) & (
+            updated.map(updated.value_counts()) >= 3
+        )
         year_later = report + pd.DateOffset(years=1)
         original_lost = (published.isna() | (published >= year_later)) & (
             updated.isna() | (updated >= year_later) | batch

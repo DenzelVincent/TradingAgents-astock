@@ -2,6 +2,12 @@ from langchain_core.tools import tool
 from typing import Annotated
 from tradingagents.dataflows.interface import route_to_vendor
 
+# 三张财报表按分析日只返回已公布的报表；空日期会让数据层整段不筛，拿到之后才公布的报表
+_MISSING_DATE = (
+    "Error: {name} requires curr_date (yyyy-mm-dd, the current analysis date). "
+    "Call it again with curr_date set."
+)
+
 
 @tool
 def get_fundamentals(
@@ -37,6 +43,8 @@ def get_balance_sheet(
     Returns:
         str: A formatted report containing balance sheet data
     """
+    if not (curr_date or "").strip():
+        return _MISSING_DATE.format(name="get_balance_sheet")
     return route_to_vendor("get_balance_sheet", ticker, freq, curr_date)
 
 
@@ -57,6 +65,8 @@ def get_cashflow(
     Returns:
         str: A formatted report containing cash flow statement data
     """
+    if not (curr_date or "").strip():
+        return _MISSING_DATE.format(name="get_cashflow")
     return route_to_vendor("get_cashflow", ticker, freq, curr_date)
 
 
@@ -77,4 +87,6 @@ def get_income_statement(
     Returns:
         str: A formatted report containing income statement data
     """
+    if not (curr_date or "").strip():
+        return _MISSING_DATE.format(name="get_income_statement")
     return route_to_vendor("get_income_statement", ticker, freq, curr_date)

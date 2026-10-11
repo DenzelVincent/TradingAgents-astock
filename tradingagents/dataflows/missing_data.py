@@ -585,11 +585,11 @@ def _tool_registry() -> dict[str, Any]:
 
 
 def _with_required_date(tool: Any, args: Any, trade_date: str) -> Any:
-    """升级前记下的调用可能没传 curr_date（v0.5.21 起财报三表必填），按任务的分析日补上。
+    """升级前记下的调用可能没传 curr_date 或传了空值（v0.5.21 起财报三表必填），按任务的分析日补上。
 
     只用于这次重试调用；记录结果时仍用原参数，才能对上原来的任务。
     """
-    if not isinstance(args, dict) or "curr_date" in args:
+    if not isinstance(args, dict) or str(args.get("curr_date") or "").strip():
         return args
     schema = getattr(tool, "args_schema", None)
     required = schema.model_json_schema().get("required") if hasattr(schema, "model_json_schema") else None
