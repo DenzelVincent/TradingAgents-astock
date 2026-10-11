@@ -1270,6 +1270,11 @@ def _get_financial_report_sina(
     # - 两个日期都晚于报告期一年以上（或都没有，如行列表）→ 原始公布日已被改写丢失，只能
     #   假定按时披露，过了法定截止日才算已公布。逾期披露的公司两个日期都还在一年内，
     #   不走这条，否则截止日一过就提前看到它还没发的财报。
+    # - 新浪 2020-03-13 给全市场做过一次批量入库，之前的各期共用这一个入库时间（茅台利润表
+    #   76 期）。它能证明这些期那时已公布，但不是原始入库时间，判断原始日期是否丢失时不算数，
+    #   否则 2019 年前三季的报表要到 2020-03-14 才放行。正常情况下共用同一入库时间的最多两期
+    #   （年报和一季报同一天发、次年同期报表重述对比数），所以按 3 期及以上认定为批量入库。
+    # - 公告日不晚于报告期的（上市前的数据有写成报告期当天的）不可信，当作没有。
     if curr_date:
         if "报告日" not in df.columns:
             logger.warning(
@@ -1290,9 +1295,11 @@ def _get_financial_report_sina(
             .dt.tz_convert("Asia/Shanghai").dt.tz_localize(None)
             if _SINA_UPDATED in df.columns else nat
         )
+        published = published.where(published > report)
+        batch = updated.map(updated.value_counts()) >= 3
         year_later = report + pd.DateOffset(years=1)
         original_lost = (published.isna() | (published >= year_later)) & (
-            updated.isna() | (updated >= year_later)
+            updated.isna() | (updated >= year_later) | batch
         )
         available = (
             (published < cutoff)

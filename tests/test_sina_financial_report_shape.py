@@ -361,6 +361,65 @@ def test_late_filer_with_rewritten_publish_date_still_waits_for_update_time(mock
 
 @pytest.mark.unit
 @patch("tradingagents.dataflows.a_stock._requests.get")
+def test_sina_batch_import_time_does_not_count_as_original_entry(mock_get):
+    """Sina bulk-loaded every period up to 2019Q3 on 2020-03-13 (600519 income statement: 76
+    periods share 1584086440). For 2019Q1-Q3 that time is within a year and publish_date was
+    rewritten by the 2020 reports; they must not stay hidden until 2020-03-14."""
+    batch = "1584086440"
+    mock_get.return_value = _response(_periods(
+        d20191231=("444.0", "20210202", batch),
+        d20190930=("333.0", "20201026", batch),
+        d20190630=("222.0", "20200729", batch),
+        d20190331=("111.0", "20200428", batch),
+        d20181231=("100.0", "20200428", batch),
+        d20180930=("90.0", "20191026", batch),
+    ))
+
+    def latest(curr_date):
+        df = a_stock._get_financial_report_sina("600519", "利润表", "quarterly", curr_date)
+        return df["货币资金"].iloc[0]
+
+    assert latest("2019-04-30") == "90.0"  # 2018 annual and 2019Q1 deadlines are both 04-30
+    assert latest("2019-05-01") == "111.0"
+    assert latest("2019-09-01") == "222.0"
+    assert latest("2019-11-15") == "333.0"
+    # The batch still proves the data was public by then: 000001's 2019 annual was in it,
+    # six weeks before the annual-report deadline.
+    assert latest("2020-03-13") == "333.0"
+    assert latest("2020-03-14") == "444.0"
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_two_periods_sharing_an_entry_time_are_not_a_batch(mock_get):
+    """A late filer's annual and Q1 reports entered together (300630, 2024-07-05) must still
+    wait for that entry time even after next year's reports rewrite their publish_date."""
+    late = _ts("2026-07-05 23:42")
+    mock_get.return_value = _response(_periods(
+        d20260331=("222.0", "20270428", late),
+        d20251231=("111.0", "20270420", late),
+        d20250930=("90.0", "20261030", _ts("2025-10-29 18:12")),
+    ))
+
+    out = a_stock.get_income_statement("600519", "quarterly", "2026-05-15")
+    assert "111.0" not in out and "222.0" not in out, out
+    out = a_stock.get_income_statement("600519", "quarterly", "2026-07-06")
+    assert "111.0" in out and "222.0" in out, out
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
+def test_publish_date_on_the_period_end_is_ignored(mock_get):
+    """Pre-listing rows can carry publish_date == report date (600519 19981231); no report is
+    public on its own period end, so fall back to the deadline."""
+    mock_get.return_value = _response(_periods(d19981231=("111.0", "19981231", None)))
+
+    assert "111.0" not in a_stock.get_income_statement("600519", "quarterly", "1999-01-15")
+    assert "111.0" in a_stock.get_income_statement("600519", "quarterly", "1999-05-01")
+
+
+@pytest.mark.unit
+@patch("tradingagents.dataflows.a_stock._requests.get")
 def test_internal_date_columns_are_not_returned(mock_get):
     mock_get.return_value = _response(_periods(
         d20251231=("111.0", "20260417", _ts("2026-04-16 22:54")),
