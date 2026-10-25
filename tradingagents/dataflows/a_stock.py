@@ -1940,8 +1940,8 @@ def _save_northbound_snapshot(date_str: str, hgt: float, sgt: float) -> None:
             writer.writerow([d, existing[d][0], existing[d][1]])
 
 
-def _load_northbound_history(n: int = 20) -> list[tuple[str, float, float]]:
-    """Load last N days of northbound close data from local cache."""
+def _load_northbound_history(n: int = 20, curr_date=None) -> list[tuple[str, float, float]]:
+    """Load last N cached northbound closes on or before curr_date."""
     import csv
 
     path = _northbound_cache_path()
@@ -1953,6 +1953,8 @@ def _load_northbound_history(n: int = 20) -> list[tuple[str, float, float]]:
         next(reader, None)
         for row in reader:
             if len(row) >= 3:
+                if curr_date and row[0] > str(curr_date)[:10]:
+                    continue
                 try:
                     rows.append((row[0], float(row[1]), float(row[2])))
                 except ValueError:
@@ -1994,46 +1996,51 @@ def get_northbound_flow(
     got_realtime = False
 
     try:
-        url_rt = "https://data.hexin.cn/market/hsgtApi/method/dayChart/"
-        r = requests.get(url_rt, headers=hsgt_headers, timeout=10)
-        d = r.json()
-
-        times = d.get("time", [])
-        hgt = d.get("hgt", [])
-        sgt = d.get("sgt", [])
-
-        if times:
-            lines.append("## Realtime (cumulative net buying, 亿元)")
-            n = len(times)
-            start_idx = max(0, n - 10)
-            for i in range(start_idx, n):
-                t = times[i]
-                h = hgt[i] if i < len(hgt) else "N/A"
-                s = sgt[i] if i < len(sgt) else "N/A"
-                lines.append(f"  {t}: HGT={h} SGT={s}")
-
-            hgt_close = float(hgt[-1]) if hgt else 0
-            sgt_close = float(sgt[-1]) if sgt else 0
-            total = hgt_close + sgt_close
+        if _is_historical(curr_date):
             lines.append(
-                f"\nClose: HGT(沪股通)={hgt_close:.2f}亿 "
-                f"SGT(深股通)={sgt_close:.2f}亿 "
-                f"Total={total:.2f}亿"
+                "历史分析已略去实时北向资金：上游仅提供当前快照，不能作为分析日当天的事实。"
             )
-            if total > 0:
-                lines.append("Signal: Net northbound INFLOW (bullish)")
-            elif total < 0:
-                lines.append("Signal: Net northbound OUTFLOW (bearish)")
-            got_realtime = True
         else:
-            lines.append("No realtime data (non-trading hours or holiday)")
+            url_rt = "https://data.hexin.cn/market/hsgtApi/method/dayChart/"
+            r = requests.get(url_rt, headers=hsgt_headers, timeout=10)
+            d = r.json()
 
-        if got_realtime:
-            today_str = datetime.now().strftime("%Y-%m-%d")
-            _save_northbound_snapshot(today_str, hgt_close, sgt_close)
+            times = d.get("time", [])
+            hgt = d.get("hgt", [])
+            sgt = d.get("sgt", [])
+
+            if times:
+                lines.append("## Realtime (cumulative net buying, 亿元)")
+                n = len(times)
+                start_idx = max(0, n - 10)
+                for i in range(start_idx, n):
+                    t = times[i]
+                    h = hgt[i] if i < len(hgt) else "N/A"
+                    s = sgt[i] if i < len(sgt) else "N/A"
+                    lines.append(f"  {t}: HGT={h} SGT={s}")
+
+                hgt_close = float(hgt[-1]) if hgt else 0
+                sgt_close = float(sgt[-1]) if sgt else 0
+                total = hgt_close + sgt_close
+                lines.append(
+                    f"\nClose: HGT(沪股通)={hgt_close:.2f}亿 "
+                    f"SGT(深股通)={sgt_close:.2f}亿 "
+                    f"Total={total:.2f}亿"
+                )
+                if total > 0:
+                    lines.append("Signal: Net northbound INFLOW (bullish)")
+                elif total < 0:
+                    lines.append("Signal: Net northbound OUTFLOW (bearish)")
+                got_realtime = True
+            else:
+                lines.append("No realtime data (non-trading hours or holiday)")
+
+            if got_realtime:
+                today_str = datetime.now().strftime("%Y-%m-%d")
+                _save_northbound_snapshot(today_str, hgt_close, sgt_close)
 
         if include_history:
-            history = _load_northbound_history(20)
+            history = _load_northbound_history(20, curr_date=curr_date)
             if history:
                 lines.append("\n## Historical Daily Close (local cache, 亿元)")
                 lines.append("Date       | HGT(沪股通) | SGT(深股通) | Total")
@@ -2052,7 +2059,7 @@ def get_northbound_flow(
                     )
             else:
                 lines.append(
-                    "\n## Historical Daily: No cached data yet. "
+                    "\n## Historical Daily: No cached data on or before the analysis date. "
                     "History accumulates automatically with each call."
                 )
 

@@ -21,6 +21,88 @@ TODAY = datetime.now().strftime("%Y-%m-%d")
 PAST = (datetime.now() - timedelta(days=90)).strftime("%Y-%m-%d")
 
 
+@pytest.fixture
+def northbound_realtime(monkeypatch):
+    from datetime import date
+    import requests
+
+    calls, saves = [], []
+    monkeypatch.setattr(a_stock, "_market_today", lambda: date(2026, 10, 22))
+
+    def fake_get(*args, **kwargs):
+        calls.append((args, kwargs))
+        return FakeResp({"time": ["15:00"], "hgt": [123.45], "sgt": [67.89]})
+
+    monkeypatch.setattr(requests, "get", fake_get)
+    monkeypatch.setattr(a_stock, "_save_northbound_snapshot", lambda *args: saves.append(args))
+    return calls, saves
+
+
+def _write_northbound_cache(monkeypatch, tmp_path, rows):
+    import csv
+
+    path = tmp_path / "northbound_daily.csv"
+    with path.open("w", encoding="utf-8", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["date", "hgt", "sgt"])
+        writer.writerows(rows)
+    monkeypatch.setattr(a_stock, "_northbound_cache_path", lambda: str(path))
+
+
+@pytest.mark.parametrize("include_history", [False, True])
+def test_northbound_historical_omits_realtime(
+    monkeypatch, tmp_path, northbound_realtime, include_history
+):
+    from datetime import date
+
+    analysis_day = date(2025, 6, 13)
+    rows = [((analysis_day - timedelta(days=24-i)).isoformat(), i, i * 2)
+            for i in range(25)]
+    rows += [((analysis_day + timedelta(days=i)).isoformat(), 9999, 9999)
+             for i in range(1, 26)]
+    _write_northbound_cache(monkeypatch, tmp_path, rows)
+
+    out = a_stock.get_northbound_flow("2025-06-13", include_history=include_history)
+
+    calls, saves = northbound_realtime
+    assert calls == []
+    assert saves == []
+    assert "略去" in out and "实时北向资金" in out and "历史" in out
+    for forbidden in ("123.45", "67.89", "191.34", "Close:", "Signal:", "Today vs avg:"):
+        assert forbidden not in out
+    if include_history:
+        kept = [line for line in out.splitlines() if line.startswith("  2025-")]
+        assert len(kept) == 20
+        assert "2025-06-13: HGT=24.00 SGT=48.00 Total=72.00" in out
+        assert "2025-05-25: HGT=5.00" in out
+        assert "2025-05-24:" not in out
+        assert "20-day avg net flow: 43.50亿" in out
+        assert "9999" not in out and "2025-06-14:" not in out
+    else:
+        assert "Historical Daily Close" not in out
+
+
+def test_northbound_historical_has_no_eligible_cache(monkeypatch, tmp_path, northbound_realtime):
+    _write_northbound_cache(monkeypatch, tmp_path, [("2025-06-14", 9999, 9999)])
+    out = a_stock.get_northbound_flow("2025-06-13", include_history=True)
+    assert "No cached data" in out
+    assert "9999" not in out
+    assert northbound_realtime == ([], [])
+
+
+@pytest.mark.parametrize("include_history", [False, True])
+def test_northbound_today_preserves_realtime(monkeypatch, tmp_path, northbound_realtime, include_history):
+    _write_northbound_cache(monkeypatch, tmp_path, [("2026-10-22", 2, 3)])
+    out = a_stock.get_northbound_flow("2026-10-22", include_history=include_history)
+    calls, saves = northbound_realtime
+    assert len(calls) == 1
+    assert len(saves) == 1 and saves[0][1:] == (123.45, 67.89)
+    assert "HGT(沪股通)=123.45亿 SGT(深股通)=67.89亿 Total=191.34亿" in out
+    assert "Signal: Net northbound INFLOW (bullish)" in out
+    assert ("Historical Daily Close" in out) is include_history
+    assert ("Today vs avg: +186.34亿" in out) is include_history
+
+
 # ---------------------------------------------------------------------------
 # 判定本身
 # ---------------------------------------------------------------------------
